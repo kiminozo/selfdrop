@@ -17,7 +17,7 @@ import { resolveSafePath } from "../middleware/pathGuard.js";
 import config from "../config.js";
 import crypto from "crypto";
 
-import type { Response } from "express";
+import type { Request, Response } from "express";
 
 export interface IFileTypes {
   [key: string]: string;
@@ -153,7 +153,7 @@ router.get("/:uuid", async (req, res) => {
     ? maskedFilename(share.uuid, basename(file.file_path), 0)
     : null;
 
-  return serveFile(res, resolvedPath, displayName);
+  return serveFile(req, res, resolvedPath, displayName);
 });
 
 router.get("/:uuid/file/:fileUuid", async (req, res) => {
@@ -204,7 +204,7 @@ router.get("/:uuid/file/:fileUuid", async (req, res) => {
     ? maskedFilename(share.uuid, basename(matchedPath), fileIndex)
     : null;
 
-  return serveFile(res, resolvedPath, displayName);
+  return serveFile(req, res, resolvedPath, displayName);
 });
 
 router.get("/:uuid/preview/:fileUuid", async (req, res) => {
@@ -415,6 +415,7 @@ async function isAccessible(resolvedPath: string) {
 }
 
 async function serveFile(
+  req: Request,
   res: Response,
   resolvedPath: string,
   displayName: string | null,
