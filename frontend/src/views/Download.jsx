@@ -110,17 +110,28 @@ export default function Download({ uuid }) {
     if (downloadAbortRef.current) return;
     taskId = taskId || (uuid + ":" + file.uuid);
 
-    const permission = permissionPromise
-      ? await permissionPromise
-      : await handle.queryPermission({ mode: "readwrite" });
-    const granted = permission === "granted" || (await handle.requestPermission({ mode: "readwrite" })) === "granted";
+    let granted = false;
+    try {
+      const permission = permissionPromise
+        ? await permissionPromise
+        : await handle.queryPermission({ mode: "readwrite" });
+      granted = permission === "granted" || (await handle.requestPermission({ mode: "readwrite" })) === "granted";
+    } catch (error) {
+      setDownloadProgress({ filename: file.filename, status: "paused", received: offset, total: Number(file.size) || 0, error: error.message || "Could not access the destination file." });
+      return;
+    }
     if (!granted) {
       setDownloadProgress({ filename: file.filename, status: "paused", received: offset, total: Number(file.size) || 0, error: "Allow file access to resume this download." });
       return;
     }
 
     const task = { id: taskId, shareUuid: uuid, fileUuid: file.uuid, filename: file.filename, total: Number(file.size) || 0, received: offset, handle, updatedAt: Date.now() };
-    await saveDownloadTask(task);
+    try {
+      await saveDownloadTask(task);
+    } catch (error) {
+      setDownloadProgress({ filename: file.filename, status: "failed", error: "Could not save the resumable download task: " + (error.message || "IndexedDB unavailable.") });
+      return;
+    }
     setSavedTask(task);
 
     const controller = new AbortController();
@@ -235,6 +246,14 @@ export default function Download({ uuid }) {
 
   async function downloadFile(file) {
     if (downloadAbortRef.current) return;
+    if (savedTask) {
+      if (savedTask.fileUuid === file.uuid) {
+        await resumeDownload();
+      } else {
+        setDownloadProgress({ filename: savedTask.filename, status: "paused", received: savedTask.received, total: savedTask.total, error: "Resume or discard the existing download before starting another file." });
+      }
+      return;
+    }
     if (typeof window.showSaveFilePicker !== "function") {
       setDownloadProgress({ filename: file.filename, status: "unsupported", error: "Use the latest Chrome or Edge over HTTPS to enable resumable downloads." });
       return;
