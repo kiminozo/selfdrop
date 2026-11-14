@@ -805,7 +805,7 @@ export default function Download({ uuid }) {
                 {downloadProgress.filename}
               </div>
             </div>
-            {downloadProgress.status !== "downloading" && (
+            {downloadProgress.status !== "downloading" && !savedTask && (
               <button className="icon-btn" title="Dismiss" onClick={() => setDownloadProgress(null)}>×</button>
             )}
           </div>
@@ -856,7 +856,7 @@ export default function Download({ uuid }) {
               The partial file was discarded.
             </div>
           )}
-          {(downloadProgress.status === "failed" || downloadProgress.status === "unsupported") && (
+          {((downloadProgress.status === "failed" && !savedTask) || downloadProgress.status === "unsupported") && (
             <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger)", lineHeight: 1.5 }}>
               {downloadProgress.error}
             </div>
