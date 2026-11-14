@@ -420,8 +420,15 @@ function serveFile(
   const serveAs = displayName || realName;
   const mimeType = getMimeType(realName);
 
+  const safeFilename = sanitizeFilename(serveAs);
+  const fallbackFilename = safeFilename.replace(/[^\x20-\x7E]/g, "_");
+  const encodedFilename = encodeURIComponent(safeFilename).replace(
+    /[!'()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+
   res.set({
-    "Content-Disposition": `attachment; filename="${sanitizeFilename(serveAs)}"`,
+    "Content-Disposition": `attachment; filename="${fallbackFilename}"; filename*=UTF-8''${encodedFilename}`,
     "Content-Type": mimeType,
   });
 
