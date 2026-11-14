@@ -114,12 +114,16 @@ export function deleteShare(uuid: string): boolean {
   return changes > 0;
 }
 
-export function validateShare(uuid: string): ValidateShareResult {
+export function validateShare(
+  uuid: string,
+  allowResumeAfterLimit = false,
+): ValidateShareResult {
   const share = getShareByUuid(uuid);
   if (!share) return { valid: false, reason: "not_found" };
   if (new Date() > new Date(share.expires_at))
     return { valid: false, reason: "expired" };
   if (
+    !allowResumeAfterLimit &&
     share.download_limit !== null &&
     share.download_count >= share.download_limit
   ) {
