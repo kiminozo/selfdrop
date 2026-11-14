@@ -222,7 +222,6 @@ export default function Download({ uuid }) {
         setDownloadProgress({
           filename: file.filename,
           status: "failed",
-          filename: file.filename,
           received,
           total: Number(file.size) || 0,
           error: error.message || "Download failed.",
