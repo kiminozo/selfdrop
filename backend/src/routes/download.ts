@@ -447,7 +447,7 @@ function serveFile(
     const rangeHeader = req.headers.range;
     const rangeMatch =
       typeof rangeHeader === "string"
-        ? rangeHeader.match(/^bytes=(\\d*)-(\\d*)$/)
+        ? rangeHeader.match(/^bytes=(\d*)-(\d*)$/)
         : null;
 
     res.setHeader("Accept-Ranges", "bytes");
