@@ -439,9 +439,70 @@ function serveFile(
     config.sendfileMode === "stream" ||
     process.env.NODE_ENV !== "production"
   ) {
+    // Node streaming mode is used by local development and can also be
+    // selected explicitly in production. Implement single byte ranges here
+    // so pause/resume works without relying on Nginx.
+    const stat = await fsp.stat(resolvedPath);
+    const fileSize = stat.size;
+    const rangeHeader = req.headers.range;
+    const rangeMatch =
+      typeof rangeHeader === "string"
+        ? rangeHeader.match(/^bytes=(\\d*)-(\\d*)$/)
+        : null;
+
+    res.setHeader("Accept-Ranges", "bytes");
+
+    // If-Range is only honored when a validator is available. This endpoint
+    // does not currently emit ETag/Last-Modified validators, so ignore Range
+    // when If-Range is supplied rather than risk returning stale partial data.
+    const hasIfRange = Boolean(req.headers["if-range"]);
+    if (rangeMatch && !hasIfRange) {
+      const startText = rangeMatch[1] || "";
+      const endText = rangeMatch[2] || "";
+      let start: number;
+      let end: number;
+
+      if (startText === "" && endText !== "") {
+        const suffixLength = Number(endText);
+        start = Math.max(fileSize - suffixLength, 0);
+        end = fileSize - 1;
+      } else {
+        start = Number(startText);
+        end = endText === "" ? fileSize - 1 : Number(endText);
+      }
+
+      if (
+        fileSize === 0 ||
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(end) ||
+        start < 0 ||
+        start >= fileSize ||
+        end < start
+      ) {
+        res.setHeader("Content-Range", `bytes */${fileSize}`);
+        res.status(416).end();
+        return;
+      }
+
+      end = Math.min(end, fileSize - 1);
+      res.status(206);
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
+      res.setHeader("Content-Length", String(end - start + 1));
+
+      const stream = createReadStream(resolvedPath, { start, end });
+      stream.on("error", () => {
+        if (!res.headersSent) res.status(404).end();
+        else res.destroy();
+      });
+      stream.pipe(res);
+      return;
+    }
+
+    res.setHeader("Content-Length", String(fileSize));
     const stream = createReadStream(resolvedPath);
     stream.on("error", () => {
       if (!res.headersSent) res.status(404).end();
+      else res.destroy();
     });
     stream.pipe(res);
     return;
