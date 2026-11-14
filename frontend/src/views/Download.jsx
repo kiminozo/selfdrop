@@ -154,7 +154,15 @@ export default function Download({ uuid }) {
         const contentRange = response.headers.get("Content-Range") || "";
         const match = contentRange.match(/^bytes (\d+)-(\d+)\/(\d+)$/i);
         if (response.status !== 206 || !match || Number(match[1]) !== offset) {
-          throw new Error("The server did not honor the resume request. The partial file was kept; try again or restart the download.");
+          const rangeInfo = contentRange || "(missing)";
+          const acceptRanges = response.headers.get("Accept-Ranges") || "(missing)";
+          throw new Error(
+            "Resume response was invalid: HTTP " + response.status +
+            ", Content-Range: " + rangeInfo +
+            ", Accept-Ranges: " + acceptRanges +
+            ", requested offset: " + offset +
+            ". The partial file was kept."
+          );
         }
         if (task.total && Number(match[3]) !== task.total) {
           throw new Error("The shared file size changed. The partial download cannot be resumed safely.");
