@@ -414,7 +414,7 @@ async function isAccessible(resolvedPath: string) {
   }
 }
 
-function serveFile(
+async function serveFile(
   res: Response,
   resolvedPath: string,
   displayName: string | null,
