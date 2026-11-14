@@ -106,11 +106,13 @@ export default function Download({ uuid }) {
     setSelected(new Set());
   }
 
-  async function startDownload(file, handle, offset = 0, taskId) {
+  async function startDownload(file, handle, offset = 0, taskId, permissionPromise = null) {
     if (downloadAbortRef.current) return;
     taskId = taskId || (uuid + ":" + file.uuid);
 
-    const permission = await handle.queryPermission({ mode: "readwrite" });
+    const permission = permissionPromise
+      ? await permissionPromise
+      : await handle.queryPermission({ mode: "readwrite" });
     const granted = permission === "granted" || (await handle.requestPermission({ mode: "readwrite" })) === "granted";
     if (!granted) {
       setDownloadProgress({ filename: file.filename, status: "paused", received: offset, total: Number(file.size) || 0, error: "Allow file access to resume this download." });
@@ -254,7 +256,10 @@ export default function Download({ uuid }) {
       setDownloadProgress({ filename: savedTask.filename, status: "failed", error: "This file is no longer part of the share." });
       return;
     }
-    await startDownload(file, savedTask.handle, savedTask.received, savedTask.id);
+    // Request permission synchronously from the Resume button click so the
+    // browser can show its file-access prompt while user activation is valid.
+    const permissionPromise = savedTask.handle.requestPermission({ mode: "readwrite" });
+    await startDownload(file, savedTask.handle, savedTask.received, savedTask.id, permissionPromise);
   }
 
   function pauseDownload() {
@@ -813,7 +818,7 @@ export default function Download({ uuid }) {
             </>
           )}
 
-          {downloadProgress.status === "paused" && (
+          {(downloadProgress.status === "paused" || (downloadProgress.status === "failed" && savedTask)) && (
             <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-2)" }}>
               {humanSize(downloadProgress.received)} saved. You can resume after refreshing or reopening this page.
               <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
