@@ -158,7 +158,10 @@ router.get("/:uuid", async (req, res) => {
 
 router.get("/:uuid/file/:fileUuid", async (req, res) => {
   const { uuid, fileUuid } = req.params;
-  const validation = sharesDb.validateShare(uuid);
+  // A byte-range request starting after byte zero is a continuation of an
+  // existing transfer, not a new download for share-limit accounting.
+  const isResumeRequest = /^bytes=[1-9]\d*-$/.test(String(req.headers.range || ""));
+  const validation = sharesDb.validateShare(uuid, isResumeRequest);
   if (!validation.valid) return res.status(404).json({ error: "Not found." });
   const { share } = validation;
 
@@ -195,7 +198,7 @@ router.get("/:uuid/file/:fileUuid", async (req, res) => {
   if (!resolvedPath || !(await isAccessible(resolvedPath)))
     return res.status(404).json({ error: "Not found." });
 
-  sharesDb.incrementDownloadCount(uuid);
+  if (!isResumeRequest) sharesDb.incrementDownloadCount(uuid);
   const fileIndex = share.filePaths.indexOf(matchedPath);
   const displayName = share.maskFilenames
     ? maskedFilename(share.uuid, basename(matchedPath), fileIndex)
