@@ -24,7 +24,8 @@
 FROM node:24-alpine AS frontend-build
 WORKDIR /build/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci
+RUN npm ci --ignore-scripts
+RUN npm rebuild
 COPY frontend/ .
 RUN npm run build
 
