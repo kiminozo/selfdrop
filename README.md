@@ -14,6 +14,7 @@ SelfDrop is a self-hosted file sharing tool that lets you create share links dir
 - **Masked filenames** to hide real file names from recipients
 - **Multi-file shares** with ZIP download
 - **File preview** — images, audio, and video in-browser
+- **Resumable downloads** — pause and resume large single-file downloads, including after reopening the share page
 - **Dark mode**
 - **Single Docker container** — Nginx + Node.js + React, no external dependencies
 - **Designed for reverse proxies** — Nginx, Traefik, and Caddy examples included
@@ -166,6 +167,26 @@ Settings → Public URL → https://files.yourdomain.com
 - **Frontend:** React 18, Vite
 - **Proxy:** Nginx (embedded)
 - **Database:** SQLite
+
+---
+
+## Resumable Downloads
+
+SelfDrop supports pausing and resuming **single-file downloads**. This is useful for large files or unreliable connections.
+
+- **Pause and resume** a download from the download task panel.
+- **Persistent progress** — the browser stores the download task and its file handle locally, so a paused task can be restored when you reopen the share page in the same browser profile.
+- **Keep partial data** — pausing preserves the bytes already written to the destination file. Resuming requests only the remaining bytes from the server using HTTP Range requests.
+- **Cancel or discard** — cancelling a task removes its partial file data and saved task information.
+- **No extra download count** — continuing an existing transfer does not count as a new download for the share's download limit.
+
+### Browser requirements
+
+Resumable downloads require a browser that supports the **File System Access API** (for example, current desktop versions of Chrome or Edge) and a secure context (**HTTPS** or `localhost`). The browser will ask you to choose a destination file and may ask you to grant file access again when resuming.
+
+The task information is stored in that browser's local site data (IndexedDB). Keep the same browser profile and do not clear SelfDrop's site data if you want to restore paused tasks. If the browser or device does not support the required file access API, the resumable workflow is unavailable; use the browser's normal download behavior instead.
+
+> Resumable downloads currently apply to individual files, not ZIP downloads.
 
 ---
 
