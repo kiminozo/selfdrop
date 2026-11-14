@@ -4,6 +4,7 @@ import FileTypeIcon from "../components/FileTypeIcon.jsx";
 import PreviewModal from "../components/PreviewModal.jsx";
 import { formatExpiry, isExpiringSoon } from "../utils/formatDate.js";
 import { getUrl } from "../utils/downloadUtils.js";
+import { getDownloadTask, saveDownloadTask, deleteDownloadTask } from "../utils/downloadTaskStore.js";
 
 export default function Download({ uuid }) {
   const [state, setState] = useState("loading");
@@ -24,11 +25,27 @@ export default function Download({ uuid }) {
 
   // Single-file download progress
   const [downloadProgress, setDownloadProgress] = useState(null);
+  const [savedTask, setSavedTask] = useState(null);
   const downloadAbortRef = useRef(null);
+  const downloadActionRef = useRef(null);
 
   useEffect(() => {
     loadShareInfo();
   }, [uuid]);
+
+  useEffect(() => {
+    if (state !== "ready" || !shareInfo?.files) return;
+    let active = true;
+    Promise.all(shareInfo.files.map((file) => getDownloadTask(uuid + ":" + file.uuid)))
+      .then((tasks) => {
+        if (!active) return;
+        const task = tasks.find(Boolean);
+        setSavedTask(task || null);
+        if (task) setDownloadProgress({ filename: task.filename, status: "paused", received: task.received, total: task.total });
+      })
+      .catch((error) => console.error("Could not restore download task:", error));
+    return () => { active = false; };
+  }, [state, shareInfo, uuid]);
 
   // Select all by default once loaded
   useEffect(() => {
@@ -89,90 +106,78 @@ export default function Download({ uuid }) {
     setSelected(new Set());
   }
 
-  async function downloadFile(file) {
+  async function startDownload(file, handle, offset = 0, taskId) {
     if (downloadAbortRef.current) return;
+    taskId = taskId || (uuid + ":" + file.uuid);
 
-    if (typeof window.showSaveFilePicker !== "function") {
-      setDownloadProgress({
-        filename: file.filename,
-        status: "unsupported",
-        error: "Your browser does not support save-with-progress. Please use the latest Chrome or Edge over HTTPS.",
-      });
+    const permission = await handle.queryPermission({ mode: "readwrite" });
+    const granted = permission === "granted" || (await handle.requestPermission({ mode: "readwrite" })) === "granted";
+    if (!granted) {
+      setDownloadProgress({ filename: file.filename, status: "paused", received: offset, total: Number(file.size) || 0, error: "Allow file access to resume this download." });
       return;
     }
 
-    // Must be called directly from the click handler before the first await.
-    let pickerPromise;
-    try {
-      pickerPromise = window.showSaveFilePicker({
-        suggestedName: file.filename,
-      });
-    } catch (error) {
-      setDownloadProgress({
-        filename: file.filename,
-        status: "failed",
-        error: error.message || "Could not open the save dialog.",
-      });
-      return;
-    }
-
-    let handle;
-    try {
-      handle = await pickerPromise;
-    } catch (error) {
-      if (error?.name === "AbortError") return;
-      setDownloadProgress({
-        filename: file.filename,
-        status: "failed",
-        error: error.message || "Could not choose a save location.",
-      });
-      return;
-    }
+    const task = { id: taskId, shareUuid: uuid, fileUuid: file.uuid, filename: file.filename, total: Number(file.size) || 0, received: offset, handle, updatedAt: Date.now() };
+    await saveDownloadTask(task);
+    setSavedTask(task);
 
     const controller = new AbortController();
     downloadAbortRef.current = controller;
+    downloadActionRef.current = null;
     let writable = null;
-    let received = 0;
-    let lastBytes = 0;
+    let received = offset;
+    let lastBytes = offset;
     let lastTime = performance.now();
     let speed = 0;
 
-    setDownloadProgress({
-      filename: file.filename,
-      status: "downloading",
-      received: 0,
-      total: Number(file.size) || 0,
-      percent: 0,
-      speed: 0,
-      remaining: null,
-    });
+    setDownloadProgress({ filename: file.filename, status: "downloading", received, total: task.total, percent: task.total ? (received / task.total) * 100 : 0, speed: 0, remaining: null });
 
     try {
       const url = getUrl(file, uuid, shareInfo.hasPassword);
-      const response = await fetch(url, {
-        signal: controller.signal,
-        cache: "no-store",
-      });
+      const headers = offset > 0 ? { Range: "bytes=" + offset + "-" } : {};
+      const response = await fetch(url, { signal: controller.signal, cache: "no-store", headers });
 
-      if (!response.ok) {
+      if (offset > 0) {
+        const contentRange = response.headers.get("Content-Range") || "";
+        const match = contentRange.match(/^bytes (\d+)-(\d+)\/(\d+)$/i);
+        if (response.status !== 206 || !match || Number(match[1]) !== offset) {
+          throw new Error("The server did not honor the resume request. The partial file was kept; try again or restart the download.");
+        }
+        if (task.total && Number(match[3]) !== task.total) {
+          throw new Error("The shared file size changed. The partial download cannot be resumed safely.");
+        }
+      } else if (!response.ok) {
         const message = await response.text().catch(() => "");
-        throw new Error(message || `Download failed (HTTP ${response.status}).`);
+        throw new Error(message || "Download failed (HTTP " + response.status + ").");
       }
-      if (!response.body) {
-        throw new Error("This browser did not provide a readable download stream.");
-      }
+      if (!response.body) throw new Error("This browser did not provide a readable download stream.");
 
-      const headerLength = Number(response.headers.get("Content-Length"));
-      const total = headerLength > 0 ? headerLength : Number(file.size) || 0;
-      writable = await handle.createWritable();
+      const contentRange = response.headers.get("Content-Range") || "";
+      const rangeMatch = contentRange.match(/^bytes 0-\d+\/(\d+)$/i);
+      const total = offset > 0 ? task.total : (Number(rangeMatch?.[1]) || Number(response.headers.get("Content-Length")) || task.total);
+      writable = await handle.createWritable({ keepExistingData: true });
+      await writable.truncate(offset);
+      await writable.seek(offset);
       const reader = response.body.getReader();
+      let checkpoint = received;
 
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
+        const result = await reader.read();
+        if (result.done) break;
+        const value = result.value;
         await writable.write(value);
         received += value.byteLength;
+
+        if (received - checkpoint >= 8 * 1024 * 1024) {
+          await writable.close();
+          writable = null;
+          task.received = received;
+          task.updatedAt = Date.now();
+          await saveDownloadTask(task);
+          checkpoint = received;
+          writable = await handle.createWritable({ keepExistingData: true });
+          await writable.seek(received);
+        }
 
         const now = performance.now();
         const elapsed = (now - lastTime) / 1000;
@@ -181,61 +186,99 @@ export default function Download({ uuid }) {
           lastBytes = received;
           lastTime = now;
         }
-
         setDownloadProgress({
-          filename: file.filename,
-          status: "downloading",
-          received,
-          total,
+          filename: file.filename, status: "downloading", received, total,
           percent: total > 0 ? Math.min(100, (received / total) * 100) : null,
-          speed,
-          remaining: speed > 0 && total > received ? (total - received) / speed : null,
+          speed, remaining: speed > 0 && total > received ? (total - received) / speed : null,
         });
       }
 
       await writable.close();
       writable = null;
-      setDownloadProgress({
-        filename: file.filename,
-        status: "completed",
-        received,
-        total: total || received,
-        percent: 100,
-        speed,
-        remaining: 0,
-      });
+      await deleteDownloadTask(taskId);
+      setSavedTask(null);
+      setDownloadProgress({ filename: file.filename, status: "completed", received, total: total || received, percent: 100, speed, remaining: 0 });
     } catch (error) {
       if (writable) {
-        try {
-          await writable.abort();
-        } catch {}
+        try { await writable.close(); } catch {}
+        writable = null;
       }
 
-      if (error?.name === "AbortError" || controller.signal.aborted) {
-        setDownloadProgress({
-          filename: file.filename,
-          status: "cancelled",
-          received,
-          total: Number(file.size) || 0,
-        });
+      const action = downloadActionRef.current;
+      if (action === "cancel") {
+        try {
+          const cleanup = await handle.createWritable({ keepExistingData: true });
+          await cleanup.truncate(0);
+          await cleanup.close();
+        } catch {}
+        await deleteDownloadTask(taskId);
+        setSavedTask(null);
+        setDownloadProgress({ filename: file.filename, status: "cancelled", received: 0, total: task.total });
       } else {
-        setDownloadProgress({
-          filename: file.filename,
-          status: "failed",
-          received,
-          total: Number(file.size) || 0,
-          error: error.message || "Download failed.",
-        });
+        task.received = received;
+        task.updatedAt = Date.now();
+        await saveDownloadTask(task);
+        setSavedTask(task);
+        if (action === "pause" || controller.signal.aborted) {
+          setDownloadProgress({ filename: file.filename, status: "paused", received, total: task.total });
+        } else {
+          setDownloadProgress({ filename: file.filename, status: "failed", received, total: task.total, error: error.message || "Download interrupted. You can resume it." });
+        }
       }
     } finally {
-      if (downloadAbortRef.current === controller) {
-        downloadAbortRef.current = null;
-      }
+      if (downloadAbortRef.current === controller) downloadAbortRef.current = null;
+      downloadActionRef.current = null;
     }
   }
 
+  async function downloadFile(file) {
+    if (downloadAbortRef.current) return;
+    if (typeof window.showSaveFilePicker !== "function") {
+      setDownloadProgress({ filename: file.filename, status: "unsupported", error: "Use the latest Chrome or Edge over HTTPS to enable resumable downloads." });
+      return;
+    }
+    let handle;
+    try {
+      handle = await window.showSaveFilePicker({ suggestedName: file.filename });
+    } catch (error) {
+      if (error?.name !== "AbortError") setDownloadProgress({ filename: file.filename, status: "failed", error: error.message || "Could not choose a save location." });
+      return;
+    }
+    await startDownload(file, handle, 0);
+  }
+
+  async function resumeDownload() {
+    if (!savedTask || downloadAbortRef.current) return;
+    const file = shareInfo?.files?.find((item) => item.uuid === savedTask.fileUuid);
+    if (!file) {
+      setDownloadProgress({ filename: savedTask.filename, status: "failed", error: "This file is no longer part of the share." });
+      return;
+    }
+    await startDownload(file, savedTask.handle, savedTask.received, savedTask.id);
+  }
+
+  function pauseDownload() {
+    if (!downloadAbortRef.current) return;
+    downloadActionRef.current = "pause";
+    downloadAbortRef.current.abort();
+  }
+
   function cancelDownload() {
-    downloadAbortRef.current?.abort();
+    if (!downloadAbortRef.current) return;
+    downloadActionRef.current = "cancel";
+    downloadAbortRef.current.abort();
+  }
+
+  async function discardSavedDownload() {
+    if (!savedTask) return;
+    try {
+      const writable = await savedTask.handle.createWritable({ keepExistingData: true });
+      await writable.truncate(0);
+      await writable.close();
+    } catch {}
+    await deleteDownloadTask(savedTask.id);
+    setSavedTask(null);
+    setDownloadProgress(null);
   }
 
   function formatRate(bytesPerSecond) {
@@ -718,7 +761,7 @@ export default function Download({ uuid }) {
             right: 20,
             bottom: 20,
             zIndex: 1000,
-            width: "min(380px, calc(100vw - 32px))",
+            width: "min(480px, calc(100vw - 32px))",
             padding: 16,
             border: "1px solid var(--border)",
             borderRadius: 10,
@@ -733,7 +776,7 @@ export default function Download({ uuid }) {
                 {downloadProgress.status === "completed" ? "Download complete" :
                   downloadProgress.status === "cancelled" ? "Download cancelled" :
                   downloadProgress.status === "failed" ? "Download failed" :
-                  downloadProgress.status === "unsupported" ? "Browser not supported" : "Downloading"}
+                  downloadProgress.status === "unsupported" ? "Browser not supported" : downloadProgress.status === "paused" ? "Download paused" : "Downloading"}
               </div>
               <div style={{ fontSize: 12, color: "var(--text-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {downloadProgress.filename}
@@ -763,10 +806,23 @@ export default function Download({ uuid }) {
                 <span>{formatRate(downloadProgress.speed)}</span>
                 <span>{downloadProgress.remaining == null ? "Calculating…" : `Remaining ${formatRemaining(downloadProgress.remaining)}`}</span>
               </div>
-              <button className="btn btn-danger-ghost" style={{ marginTop: 12 }} onClick={cancelDownload}>Cancel download</button>
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button className="btn btn-secondary" onClick={pauseDownload}>Pause</button>
+                <button className="btn btn-danger-ghost" onClick={cancelDownload}>Cancel</button>
+              </div>
             </>
           )}
 
+          {downloadProgress.status === "paused" && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-2)" }}>
+              {humanSize(downloadProgress.received)} saved. You can resume after refreshing or reopening this page.
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button className="btn btn-primary" onClick={resumeDownload}>Resume download</button>
+                <button className="btn btn-danger-ghost" onClick={discardSavedDownload}>Discard</button>
+              </div>
+              {downloadProgress.error && <div style={{ color: "var(--danger)", marginTop: 8 }}>{downloadProgress.error}</div>}
+            </div>
+          )}
           {downloadProgress.status === "completed" && (
             <div style={{ marginTop: 10, fontSize: 12, color: "var(--accent)" }}>
               {humanSize(downloadProgress.received)} saved successfully.
