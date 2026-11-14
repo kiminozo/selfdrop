@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Logo from "../components/Logo.jsx";
 import FileTypeIcon from "../components/FileTypeIcon.jsx";
 import PreviewModal from "../components/PreviewModal.jsx";
@@ -21,6 +21,10 @@ export default function Download({ uuid }) {
   // ZIP state
   const [zipping, setZipping] = useState(false);
   const [zipError, setZipError] = useState("");
+
+  // Single-file download progress
+  const [downloadProgress, setDownloadProgress] = useState(null);
+  const downloadAbortRef = useRef(null);
 
   useEffect(() => {
     loadShareInfo();
@@ -85,17 +89,167 @@ export default function Download({ uuid }) {
     setSelected(new Set());
   }
 
-  function downloadFile(file) {
-    const url = getUrl(file, uuid, shareInfo.hasPassword);
+  async function downloadFile(file) {
+    if (downloadAbortRef.current) return;
 
-    const link = document.createElement("a");
-    link.href = url;
-    link.style.display = "none";
+    if (typeof window.showSaveFilePicker !== "function") {
+      setDownloadProgress({
+        filename: file.filename,
+        status: "unsupported",
+        error: "Your browser does not support save-with-progress. Please use the latest Chrome or Edge over HTTPS.",
+      });
+      return;
+    }
 
-    document.body.appendChild(link);
-    link.click();
+    // Must be called directly from the click handler before the first await.
+    let pickerPromise;
+    try {
+      pickerPromise = window.showSaveFilePicker({
+        suggestedName: file.filename,
+      });
+    } catch (error) {
+      setDownloadProgress({
+        filename: file.filename,
+        status: "failed",
+        error: error.message || "Could not open the save dialog.",
+      });
+      return;
+    }
 
-    document.body.removeChild(link);
+    let handle;
+    try {
+      handle = await pickerPromise;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      setDownloadProgress({
+        filename: file.filename,
+        status: "failed",
+        error: error.message || "Could not choose a save location.",
+      });
+      return;
+    }
+
+    const controller = new AbortController();
+    downloadAbortRef.current = controller;
+    let writable = null;
+    let received = 0;
+    let lastBytes = 0;
+    let lastTime = performance.now();
+    let speed = 0;
+
+    setDownloadProgress({
+      filename: file.filename,
+      status: "downloading",
+      received: 0,
+      total: Number(file.size) || 0,
+      percent: 0,
+      speed: 0,
+      remaining: null,
+    });
+
+    try {
+      const url = getUrl(file, uuid, shareInfo.hasPassword);
+      const response = await fetch(url, {
+        signal: controller.signal,
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        const message = await response.text().catch(() => "");
+        throw new Error(message || `Download failed (HTTP ${response.status}).`);
+      }
+      if (!response.body) {
+        throw new Error("This browser did not provide a readable download stream.");
+      }
+
+      const headerLength = Number(response.headers.get("Content-Length"));
+      const total = headerLength > 0 ? headerLength : Number(file.size) || 0;
+      writable = await handle.createWritable();
+      const reader = response.body.getReader();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        await writable.write(value);
+        received += value.byteLength;
+
+        const now = performance.now();
+        const elapsed = (now - lastTime) / 1000;
+        if (elapsed >= 0.4) {
+          speed = (received - lastBytes) / elapsed;
+          lastBytes = received;
+          lastTime = now;
+        }
+
+        setDownloadProgress({
+          filename: file.filename,
+          status: "downloading",
+          received,
+          total,
+          percent: total > 0 ? Math.min(100, (received / total) * 100) : null,
+          speed,
+          remaining: speed > 0 && total > received ? (total - received) / speed : null,
+        });
+      }
+
+      await writable.close();
+      writable = null;
+      setDownloadProgress({
+        filename: file.filename,
+        status: "completed",
+        received,
+        total: total || received,
+        percent: 100,
+        speed,
+        remaining: 0,
+      });
+    } catch (error) {
+      if (writable) {
+        try {
+          await writable.abort();
+        } catch {}
+      }
+
+      if (error?.name === "AbortError" || controller.signal.aborted) {
+        setDownloadProgress({
+          filename: file.filename,
+          status: "cancelled",
+          received,
+          total: Number(file.size) || 0,
+        });
+      } else {
+        setDownloadProgress({
+          filename: file.filename,
+          status: "failed",
+          received,
+          total: Number(file.size) || 0,
+          error: error.message || "Download failed.",
+        });
+      }
+    } finally {
+      if (downloadAbortRef.current === controller) {
+        downloadAbortRef.current = null;
+      }
+    }
+  }
+
+  function cancelDownload() {
+    downloadAbortRef.current?.abort();
+  }
+
+  function formatRate(bytesPerSecond) {
+    if (!bytesPerSecond) return "—";
+    return `${humanSize(bytesPerSecond)}/s`;
+  }
+
+  function formatRemaining(seconds) {
+    if (!Number.isFinite(seconds)) return "—";
+    const value = Math.max(0, Math.ceil(seconds));
+    if (value < 60) return `${value}s`;
+    const minutes = Math.floor(value / 60);
+    const remainder = value % 60;
+    return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
   }
 
   async function downloadZip() {
@@ -554,6 +708,81 @@ export default function Download({ uuid }) {
           hasPassword={password ? true : false}
           onClose={() => setPreviewIndex(null)}
         />
+      )}
+      {downloadProgress && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            right: 20,
+            bottom: 20,
+            zIndex: 1000,
+            width: "min(380px, calc(100vw - 32px))",
+            padding: 16,
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            background: "var(--surface)",
+            color: "var(--text)",
+            boxShadow: "var(--shadow-md)",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+                {downloadProgress.status === "completed" ? "Download complete" :
+                  downloadProgress.status === "cancelled" ? "Download cancelled" :
+                  downloadProgress.status === "failed" ? "Download failed" :
+                  downloadProgress.status === "unsupported" ? "Browser not supported" : "Downloading"}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {downloadProgress.filename}
+              </div>
+            </div>
+            {downloadProgress.status !== "downloading" && (
+              <button className="icon-btn" title="Dismiss" onClick={() => setDownloadProgress(null)}>×</button>
+            )}
+          </div>
+
+          {downloadProgress.status === "downloading" && (
+            <>
+              <div style={{ height: 6, background: "var(--surface2)", borderRadius: 99, overflow: "hidden", margin: "12px 0 8px" }}>
+                <div style={{
+                  width: downloadProgress.percent == null ? "35%" : `${downloadProgress.percent}%`,
+                  height: "100%",
+                  background: "var(--accent)",
+                  borderRadius: 99,
+                  transition: "width 0.2s ease",
+                }} />
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, color: "var(--text-2)", fontFamily: "var(--mono)" }}>
+                <span>{humanSize(downloadProgress.received)} / {downloadProgress.total ? humanSize(downloadProgress.total) : "—"}</span>
+                <span>{downloadProgress.percent == null ? "…" : `${downloadProgress.percent.toFixed(1)}%`}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 5, fontSize: 11, color: "var(--text-3)" }}>
+                <span>{formatRate(downloadProgress.speed)}</span>
+                <span>{downloadProgress.remaining == null ? "Calculating…" : `Remaining ${formatRemaining(downloadProgress.remaining)}`}</span>
+              </div>
+              <button className="btn btn-danger-ghost" style={{ marginTop: 12 }} onClick={cancelDownload}>Cancel download</button>
+            </>
+          )}
+
+          {downloadProgress.status === "completed" && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--accent)" }}>
+              {humanSize(downloadProgress.received)} saved successfully.
+            </div>
+          )}
+          {downloadProgress.status === "cancelled" && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-2)" }}>
+              The partial file was discarded.
+            </div>
+          )}
+          {(downloadProgress.status === "failed" || downloadProgress.status === "unsupported") && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger)", lineHeight: 1.5 }}>
+              {downloadProgress.error}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
