@@ -251,14 +251,32 @@ export default function Download({ uuid }) {
 
   async function resumeDownload() {
     if (!savedTask || downloadAbortRef.current) return;
-    const file = shareInfo?.files?.find((item) => item.uuid === savedTask.fileUuid);
+    let file = shareInfo?.files?.find((item) => item.uuid === savedTask.fileUuid);
     if (!file) {
       setDownloadProgress({ filename: savedTask.filename, status: "failed", error: "This file is no longer part of the share." });
       return;
     }
-    // Request permission synchronously from the Resume button click so the
-    // browser can show its file-access prompt while user activation is valid.
+    // Trigger the permission request directly from the Resume button click.
     const permissionPromise = savedTask.handle.requestPermission({ mode: "readwrite" });
+    if (shareInfo.hasPassword) {
+      // Signed download URLs expire; obtain a fresh one before every resume.
+      const response = await fetch("/s/" + uuid + "/verify-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!response.ok) {
+        setDownloadProgress({ filename: file.filename, status: "paused", received: savedTask.received, total: savedTask.total, error: "Please unlock this share again to refresh its download link." });
+        return;
+      }
+      const refreshed = await response.json();
+      setShareInfo(refreshed);
+      file = refreshed.files.find((item) => item.uuid === savedTask.fileUuid);
+      if (!file) {
+        setDownloadProgress({ filename: savedTask.filename, status: "failed", error: "This file is no longer part of the share." });
+        return;
+      }
+    }
     await startDownload(file, savedTask.handle, savedTask.received, savedTask.id, permissionPromise);
   }
 
